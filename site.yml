@@ -1,0 +1,149 @@
+---
+# master playbook
+
+- name: install Ruby
+  hosts: [web solr]
+  remote_user: dryad
+  vars:
+    workspace: /apps/dryad/install/
+    ruby_download_url: http://cache.ruby-lang.org/pub/ruby/2.4/ruby-2.4.5.tar.gz
+    ruby_extracted_dir: ruby-2.4.5
+    configure_prefix: /dryad/local
+
+  tasks:
+  - name: create install directory
+    file:
+      path: "{{ workspace }}"
+      state: directory
+
+  - name: download and unarchive ruby
+    unarchive:
+      src: "{{ ruby_download_url }}"
+      dest: "{{ workspace }}"
+      remote_src: yes
+
+  - name: configure, make, make install
+    shell: "{{ item }}"
+    args:
+      chdir: "{{ workspace }}{{ ruby_extracted_dir }}"
+    with_items:
+      - "./configure --prefix={{ configure_prefix }}"
+      - make
+      - make install
+
+- name: install base gems, not all needed for solr but they don't hurt, either
+  hosts: [web solr]
+  remote_user: dryad
+  tasks:
+  - name: update gems
+    shell: "gem {{ item }}"
+    with_items:
+      - "update --system"
+      - "install bundler -f"
+      - "install capistrano -v 3.4.1 -f"
+      - "install capistrano-bundler -f"
+      - "install capistrano-passenger -v 0.2.0 -f"
+      - "install capistrano-rails -v 1.4.0 -f"
+
+- name: setup repos -- be sure to add server's public key as deploy key to dryad-config repo and test with ssh -T git@github.com
+  hosts: web
+  remote_user: dryad
+  tasks:
+  - name: setup directory
+    file:
+      path: "{{ item }}"
+      state: directory
+    with_items:
+      - "~/apps/ui/"
+      - "~/apps/ui/releases"
+
+  - name: clone config repo into config directory in shared
+    git:
+      repo: 'git@github.com:cdlib/dryad-config.git'
+      dest: "~/apps/ui/shared"
+      clone: yes
+      version: master
+
+  - name: clone stash repo into the releases directory
+    git:
+      repo: 'https://github.com/CDL-Dryad/stash.git'
+      dest: "~/apps/ui/releases/stash"
+      clone: yes
+      version: master
+
+- name: install SOLR
+  hosts: solr
+  remote_user: dryad
+  vars:
+    apps: ~/apps
+    solr_version: 5.5.5
+    solr_download_url: "http://archive.apache.org/dist/lucene/solr/{{ solr_version }}/solr-{{ solr_version }}.tgz"
+    solr_dir: "{{ apps }}/solr"
+    solr_version_dir: "{{ apps }}/solr-{{ solr_version }}"
+    solr_data_dir: "{{ solr_dir }}/data"
+    geoblacklight_url: https://github.com/geoblacklight/geoblacklight-schema/archive/v0.3.2.tar.gz
+
+  tasks:
+  # stat these items to see if they exist
+  - name: SOLR dir exists?
+    stat: path={{ solr_dir }}
+    ignore_errors: true
+    register: my_solr_dir
+
+  - name: SOLR version dir exists?
+    stat: path={{ solr_version_dir }}
+    ignore_errors: true
+    register: my_solr_version_dir
+
+  - name: SOLR data dir exists?
+    stat: path={{ solr_data_dir }}
+    ignore_errors: true
+    register: my_solr_data_dir
+
+  - name: stop the SOLR server with Jim's magic scripts (if it exists)
+    shell: "~/init.d/solr.dryad stop"
+    ignore_errors: yes
+
+  - name: download and unarchive solr
+    unarchive:
+      src: "{{ solr_download_url }}"
+      dest: "{{ apps }}"
+      remote_src: yes
+    when: my_solr_version_dir.stat.exists == false
+
+  - name: create solr symlink
+    file:
+      src: ~/apps/solr-{{ solr_version }}
+      dest: ~/apps/solr
+      state: link
+    when: my_solr_dir.stat.exists == false
+
+  - name: copy config to the data directory because our init.d startup scripts use weird directory structure
+    shell: "cp -r {{ solr_dir }}/server/solr {{ solr_dir }}/data"
+    when: my_solr_data_dir.stat.exists == false
+
+  - name: start the SOLR server with Jim's magic scripts
+    shell: "~/init.d/solr.dryad start"
+    ignore_errors: yes
+
+  - name: create geoblacklight core
+    shell: SOLR_HOME={{ solr_data_dir }} {{ solr_dir}}/bin/solr create -c geoblacklight
+    when: my_solr_data_dir.stat.exists == false
+
+  - name: Ensures ~/tmp exists
+    file: path=~/tmp state=directory
+
+  - name: download and unarchive geoblacklight schema
+    unarchive:
+      src: "{{ geoblacklight_url }}"
+      dest: "~/tmp"
+      remote_src: yes
+    when: my_solr_data_dir.stat.exists == false
+
+  - name: copy the geoblacklight schema into the SOLR core
+    shell: "cp ~/tmp/geoblacklight-schema-0.3.2/conf/* {{ solr_data_dir }}/geoblacklight/conf"
+    when: my_solr_data_dir.stat.exists == false
+
+  - name: restart the SOLR server with Jim's magic scripts
+    shell: "~/init.d/solr.dryad restart"
+    ignore_errors: yes
